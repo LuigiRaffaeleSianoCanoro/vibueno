@@ -1,0 +1,39 @@
+# User-facing routes for verify-vibueno and post-deploy smoke
+version: 1
+app: vibueno
+routes:
+  - id: shell
+    path: /
+    marker: vibueno-shell
+    auth: false
+    status: implemented
+  - id: login
+    path: /login
+    marker: vibueno-login
+    auth: false
+    status: planned
+  - id: approval
+    path: /approval
+    marker: vibueno-approval
+    auth: true
+    status: planned
+  - id: planning
+    path: /planning
+    marker: vibueno-planning
+    auth: true
+    status: planned
+  - id: buffer-wizard
+    path: /settings/buffer
+    marker: vibueno-buffer-wizard
+    auth: true
+    status: planned
+  - id: credits
+    path: /settings/credits
+    marker: vibueno-credits
+    auth: true
+    status: planned
+checks:
+  - id: version.api
+    path: /api/version
+    description: Served SHA matches merged commit after deploy
+    status: implemented

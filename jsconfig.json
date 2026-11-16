@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "checkJs": true,
+    "allowJs": true,
+    "noEmit": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "maxNodeModuleJsDepth": 0
+  },
+  "include": ["hosted/**/*.mjs", "scripts/**/*.mjs", "tests/**/*.mjs"],
+  "exclude": ["hosted/worker.js", "hosted/public/**", "node_modules"]
+}
