@@ -49,7 +49,7 @@ async function wranglerDeploy() {
   const args =
     wranglerBin === 'npx'
       ? ['--yes', `wrangler@${wranglerVersion}`, ...deployArgs]
-      : [wranglerBin, ...deployArgs];
+      : deployArgs;
   const code = await runCommand(cmd, args, {
     cwd: hostedDir,
     env: {
@@ -81,10 +81,11 @@ async function main() {
     deploySha,
     allowFirstDeploy,
     runDeploy: wranglerDeploy,
-    runSmoke: async ({ phase, base, sha }) => {
-      const expectSha = phase === 'post-deploy' ? sha : '';
+    runSmoke: async ({ phase, base, sha, rollbackSha }) => {
+      const expectSha =
+        phase === 'post-deploy' ? sha : phase === 'post-rollback' ? rollbackSha ?? '' : '';
       const retry = await smokeWithBackoff({
-        runSmoke: () => runSmokeCli(base, expectSha),
+        runSmoke: () => runSmokeCli(base, expectSha || undefined),
       });
       return { ok: retry.ok, exitCode: retry.lastExitCode };
     },

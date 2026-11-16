@@ -50,7 +50,8 @@
 - **Single artifact:** `npm run build` → `wrangler pages deploy hosted/public` with **wrangler 4.45.0** (pinned in workflow).
 - **Triggers:** `workflow_run` after **CI** succeeds on `push` to `main`, plus `workflow_dispatch`. No `pull_request_target`.
 - **Smoke:** `scripts/smoke-vibueno.mjs` with bounded backoff (`scripts/smoke-retry.mjs`, ~2 min); production URL defaults to `https://vibueno.pages.dev`.
-- **Rollback:** `scripts/pages-deploy-lib.mjs` records the current production deployment id, rolls back on smoke failure (`POST …/deployments/{id}/rollback`), then re-smokes without requiring the failed commit SHA. First deploy requires `VIBUENO_ALLOW_FIRST_DEPLOY=true` when no prior deployment exists.
+- **Rollback:** `scripts/pages-deploy-lib.mjs` records the **canonical** live production deployment (not newest history), rolls back on smoke failure, then re-smokes against the previous commit SHA from deployment metadata. First deploy requires `VIBUENO_ALLOW_FIRST_DEPLOY=true` when no prior deployment exists.
+- **Preflight:** `scripts/verify-deploy-preflight.mjs` — `workflow_dispatch` only on `refs/heads/main` with green CI; deploy SHA must equal `origin/main` HEAD (stale `workflow_run` skipped).
 - **Bindings:** `hosted/wrangler.toml` lists D1 `DB` and KV `KV` ids matching the Pages dashboard; Worker foundation still does not read them.
 - **Secrets:** Missing `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` → Deploy job **skips** with `::notice::` (does not fail CI).
 

@@ -9,7 +9,7 @@ on:
     branches: [main]
 
 concurrency:
-  group: deploy-production
+  group: deploy-production-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
@@ -23,6 +23,7 @@ jobs:
        github.event.workflow_run.event == 'push')
     permissions:
       contents: read
+      checks: read
     steps:
       - name: Resolve deploy SHA
         id: meta
@@ -37,8 +38,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.meta.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Current origin/main HEAD
+        id: main
+        run: |
+          set -euo pipefail
+          git fetch origin main --depth=1
+          echo "sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy preflight (main HEAD + required CI)
+        id: preflight
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          DEPLOY_SHA: ${{ steps.meta.outputs.sha }}
+          MAIN_HEAD_SHA: ${{ steps.main.outputs.sha }}
+        run: node scripts/verify-deploy-preflight.mjs
 
       - uses: actions/setup-node@v4
+        if: steps.preflight.outputs.skip_preflight != 'true'
         with:
           node-version: '22'
           cache: npm
@@ -47,11 +67,13 @@ jobs:
             hosted/package-lock.json
 
       - name: Install dependencies
+        if: steps.preflight.outputs.skip_preflight != 'true'
         run: |
           npm ci
           npm ci --prefix hosted
 
       - name: Check Cloudflare secrets
+        if: steps.preflight.outputs.skip_preflight != 'true'
         id: cf
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -66,17 +88,17 @@ jobs:
           fi
 
       - name: Build single artifact
-        if: steps.cf.outputs.skip != 'true'
+        if: steps.preflight.outputs.skip_preflight != 'true' && steps.cf.outputs.skip != 'true'
         run: npm run build
         env:
           GITHUB_SHA: ${{ steps.meta.outputs.sha }}
 
       - name: Skip notice
-        if: steps.cf.outputs.skip == 'true'
-        run: echo "Deploy not run (Cloudflare secrets not configured)."
+        if: steps.preflight.outputs.skip_preflight == 'true' || steps.cf.outputs.skip == 'true'
+        run: echo "Deploy not run (preflight or Cloudflare secrets)."
 
       - name: Deploy, smoke, rollback
-        if: steps.cf.outputs.skip != 'true'
+        if: steps.preflight.outputs.skip_preflight != 'true' && steps.cf.outputs.skip != 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

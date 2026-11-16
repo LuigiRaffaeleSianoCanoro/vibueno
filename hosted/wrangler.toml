@@ -7,9 +7,18 @@ pages_build_output_dir = "public"
 binding = "DB"
 database_name = "vibueno-prod"
 database_id = "82488743-3c20-41b8-937d-0bb93351e07d"
-preview_database_id = "7a58977d-d778-4775-889a-7140235a65bf"
 
 [[kv_namespaces]]
 binding = "KV"
 id = "27900d5d21c644e299b1df5cedfa882b"
-preview_id = "619e2451c27049389994e8a854fb54b6"
+
+[env.preview]
+
+[[env.preview.d1_databases]]
+binding = "DB"
+database_name = "vibueno-preview"
+database_id = "7a58977d-d778-4775-889a-7140235a65bf"
+
+[[env.preview.kv_namespaces]]
+binding = "KV"
+id = "619e2451c27049389994e8a854fb54b6"
