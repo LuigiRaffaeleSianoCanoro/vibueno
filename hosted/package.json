@@ -1,0 +1,12 @@
+{
+  "name": "vibueno-hosted",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build:pages": "node build-pages.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

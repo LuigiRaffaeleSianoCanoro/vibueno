@@ -1,0 +1,14 @@
+node_modules/
+hosted/node_modules/
+hosted/bundled-templates.mjs
+hosted/public/_worker.js
+hosted/.wrangler/
+.wrangler/
+dist/
+.evidence/
+evidence/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store

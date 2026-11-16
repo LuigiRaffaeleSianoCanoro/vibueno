@@ -1,0 +1,6 @@
+# Local/preview only in this foundation PR — no remote bindings or secrets.
+name = "vibueno"
+compatibility_date = "2025-11-01"
+pages_build_output_dir = "public"
+
+# Future: D1 + KV per tenant; custom hostnames via Cloudflare for SaaS (see docs/decisions.md).
