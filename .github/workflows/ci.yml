@@ -48,8 +48,12 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            hosted/package-lock.json
       - run: npm ci
+      - run: npm ci
+        working-directory: hosted
       - run: npm run typecheck
 
   unit-tests:
