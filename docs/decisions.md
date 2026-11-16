@@ -23,4 +23,20 @@
 
 **Decision:** `interrogate reviewers` → Claude Opus + **gpt-6-astra** via **Neon AI Gateway** (`NEON_AI_GATEWAY_TOKEN`, `NEON_AI_GATEWAY_BASE_URL`). No API keys in the repository.
 
-**Status:** Configured in `.cursor/rules/pstack-models.mdc`.
+**Status:** Configured in `.cursor/rules/pstack-models.mdc` (`interrogate reviewers` use gateway slugs `claude-opus-5-5` and `gpt-6-astra`).
+
+## 2026-11-16 — `main` branch protection (pending)
+
+**Context:** FAB-190 AC1 requires a protected `main` with required CI checks.
+
+**Decision:** Document required GitHub Actions job names in the PR and `AGENTS.md`; **enable branch protection after merge** when Luigi confirms.
+
+**Blocker:** Private repo on GitHub Free returns HTTP 403 when configuring protection (`Upgrade to GitHub Pro or make this repository public`). **Pending Luigi:** upgrade to GitHub Pro, make the repo public, or accept manual merge discipline until protection is available.
+
+**Status:** Pending (not enforced in this foundation PR).
+
+## 2026-11-16 — Deploy / smoke / rollback workflow
+
+**Decision:** Add `.github/workflows/deploy.yml` (`workflow_dispatch` only). It builds the single artifact and documents the intended order (preview deploy → smoke → promote → prod smoke → rollback on failure). Real wrangler deploy steps stay gated on `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` (not set in foundation).
+
+**Status:** Skeleton merged with FAB-190; live deploy in a follow-up issue/PR.

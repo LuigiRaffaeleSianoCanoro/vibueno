@@ -1,39 +1,44 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { access } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
 import { allTemplateNames, ROUTE_MARKERS } from '../hosted/routes.mjs';
+import { isolatedBuild, removeIsolatedBuild } from './helpers/isolated-build.mjs';
 
-const exec = promisify(execFile);
-const hosted = fileURLToPath(new URL('../hosted/', import.meta.url));
+const SHA = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
 
-test('build:pages embeds every registered route template', async () => {
-  await exec('npm', ['run', 'build:pages'], {
-    cwd: hosted,
-    env: { ...process.env, GITHUB_SHA: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' },
-  });
-  const mod = await import(new URL('../hosted/bundled-templates.mjs', import.meta.url).href);
+test('build:pages embeds every registered route template', async (t) => {
+  const { root, bundled } = await isolatedBuild(SHA);
+  t.after(() => removeIsolatedBuild(root));
+
   for (const name of allTemplateNames()) {
-    const tpl = mod.BUNDLED_TEMPLATES?.[name];
+    const tpl = bundled.BUNDLED_TEMPLATES?.[name];
     assert.ok(typeof tpl === 'string' && tpl.length > 200, `missing bundled template: ${name}`);
     const marker = ROUTE_MARKERS[name];
-    if (marker) {
-      assert.match(tpl, new RegExp(`data-testid=["']${marker}["']`));
-    }
+    assert.ok(marker, `missing marker for route ${name}`);
+    assert.match(tpl, new RegExp(`data-testid=["']${marker}["']`));
   }
-  assert.match(String(mod.BUILD_SHA), /^[0-9a-f]{7,40}$/);
-  const workerText = await readFile(new URL('../hosted/public/_worker.js', import.meta.url), 'utf8');
-  assert.ok(
-    workerText.includes('data-testid="vibueno-shell"') || workerText.includes("data-testid='vibueno-shell'"),
-  );
+  assert.equal(bundled.BUILD_SHA, SHA);
+  assert.equal(bundled.BUILD_VERSION_OK, true);
+
+  const workerText = await readFile(join(root, 'public/_worker.js'), 'utf8');
+  for (const marker of Object.values(ROUTE_MARKERS)) {
+    assert.ok(
+      workerText.includes(`data-testid="${marker}"`) || workerText.includes(`data-testid='${marker}'`),
+    );
+  }
 });
 
 test('every manifest route has a public HTML source file', async () => {
   const { ROUTE_TEMPLATES } = await import(new URL('../hosted/routes.mjs', import.meta.url).href);
   for (const { file } of Object.values(ROUTE_TEMPLATES)) {
     await access(new URL(`../hosted/public/${file}`, import.meta.url));
+  }
+});
+
+test('every manifest route has ROUTE_MARKERS', () => {
+  for (const name of allTemplateNames()) {
+    assert.ok(ROUTE_MARKERS[name], `ROUTE_MARKERS missing for ${name}`);
   }
 });

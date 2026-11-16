@@ -1,5 +1,6 @@
-import { BUNDLED_TEMPLATES, BUILD_SHA } from './bundled-templates.mjs';
+import { BUNDLED_TEMPLATES, BUILD_SHA, BUILD_VERSION_OK } from './bundled-templates.mjs';
 import { templateNameForPath } from './routes.mjs';
+import { versionPayloadFromMeta } from './version.mjs';
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -11,8 +12,13 @@ function json(data, status = 200) {
   });
 }
 
+export function versionPayload() {
+  return versionPayloadFromMeta(BUILD_SHA, BUILD_VERSION_OK);
+}
+
 export function apiVersion() {
-  return json({ ok: true, sha: BUILD_SHA || 'unknown' });
+  const payload = versionPayload();
+  return json(payload, payload.ok ? 200 : 503);
 }
 
 function serveTemplate(name) {
@@ -28,24 +34,42 @@ function serveTemplate(name) {
   });
 }
 
-async function handleFetch(request) {
+function responseWithoutBody(response) {
+  return new Response(null, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
+async function handleFetch(request, env) {
   const url = new URL(request.url);
   const { pathname } = url;
+  const method = request.method.toUpperCase();
 
-  if (request.method === 'GET' && pathname === '/api/version') {
-    return apiVersion();
+  if (pathname === '/api/version' && (method === 'GET' || method === 'HEAD')) {
+    const res = apiVersion();
+    return method === 'HEAD' ? responseWithoutBody(res) : res;
   }
 
-  if (request.method === 'GET') {
+  if (method === 'GET' || method === 'HEAD') {
     const name = templateNameForPath(pathname);
-    if (name) return serveTemplate(name);
+    if (name) {
+      const res = serveTemplate(name);
+      return method === 'HEAD' ? responseWithoutBody(res) : res;
+    }
+  }
+
+  if (env?.ASSETS) {
+    const assetRes = await env.ASSETS.fetch(request);
+    if (assetRes.status !== 404) return assetRes;
   }
 
   return new Response('Not Found', { status: 404 });
 }
 
 export default {
-  fetch(request, _env, _ctx) {
-    return handleFetch(request);
+  fetch(request, env, _ctx) {
+    return handleFetch(request, env);
   },
 };

@@ -109,7 +109,26 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            hosted/package-lock.json
       - run: npm ci
+      - run: npm ci
+        working-directory: hosted
       - name: route-manifest
         run: npm run check:routes
+
+  no-agent-os-leak:
+    name: no-agent-os-leak
+    needs: install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: no-agent-os-leak
+        run: npm run check:no-agent-os-leak

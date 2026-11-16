@@ -17,10 +17,14 @@ Multi-tenant white-label SaaS foundation (content approval, AI planning via Verc
 |------|------------------|
 | Every HTML route ships in the same deploy as the Worker (no orphan `tpl:*` KV) | `hosted/build-pages.mjs` embeds `public/*.html` into `bundled-templates.mjs` + esbuild `public/_worker.js` |
 | `/api/version` exposes the merged commit SHA | `BUILD_SHA` baked at build; `hosted/worker.js` `GET /api/version`; `tests/api_version.test.mjs` |
-| Each registered route has a page and smoke marker | `hosted/routes.mjs` manifest; `scripts/check-route-manifest.mjs`; `tests/templates_bundled.test.mjs`; CI job **route-manifest** |
-| CI blocks merge without tests, lint, typecheck, build | `.github/workflows/ci.yml` |
+| Each registered route has a page and smoke marker (source + bundle) | `hosted/routes.mjs`; `scripts/check-route-manifest.mjs` (runs build); `tests/templates_bundled.test.mjs`; CI **route-manifest** |
+| CI blocks merge without tests, lint, typecheck, build | `.github/workflows/ci.yml` (jobs: install, lint, typecheck, unit-tests, build, route-manifest, no-agent-os-leak) |
 | Test-first for API and routing | `tests/*.test.mjs` run in CI job **unit-tests** |
+| No agent-os / Luigi identifiers in Vibueno | `scripts/check-no-agent-os-leak.mjs`; CI job **no-agent-os-leak** |
 | No secrets in repo | `.gitignore`, review; gateway auth via `NEON_AI_GATEWAY_*` / Vercel `AI_GATEWAY_API_KEY` in env only |
+| Valid build SHA only (no `unknown`, no dirty tree) | `hosted/build-sha.mjs`; `GET /api/version` returns `ok:false` when bundle invalid; `tests/build_sha.test.mjs` |
+| Static assets + HEAD on routes | `hosted/worker.js` → `env.ASSETS.fetch`; HEAD for `/` and `/api/version` |
+| Deploy smoke + rollback path | `.github/workflows/deploy.yml` (manual, secret-gated skeleton) |
 | Adversarial reviewers use Opus + Astra (not the author model) | `.cursor/rules/pstack-models.mdc` → `interrogate reviewers` |
 | Evidence before "listo" | `.cursor/skills/verify-vibueno/SKILL.md` + `vibueno-feature-map.yaml` |
 | Post-deploy read-only smoke | `scripts/smoke-vibueno.mjs` |

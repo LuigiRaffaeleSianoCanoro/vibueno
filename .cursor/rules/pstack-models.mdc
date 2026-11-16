@@ -3,7 +3,8 @@ description: pstack per-role model choices for Vibueno (Neon AI Gateway for adve
 alwaysApply: true
 ---
 # pstack model configuration. One line per role. Delete a line to fall back to the skill default.
-# Adversarial models are invoked via Neon AI Gateway — set NEON_AI_GATEWAY_TOKEN and NEON_AI_GATEWAY_BASE_URL in the environment (never commit).
+# Neon AI Gateway chat models use slugs without Cursor effort suffixes (e.g. claude-opus-5-5, gpt-6-astra).
+# Set NEON_AI_GATEWAY_TOKEN and NEON_AI_GATEWAY_BASE_URL in the environment (never commit).
 # defaults: 2
 # budget: large (xhigh)
 feature, refactoring: claude-opus-5-5-xhigh
@@ -18,4 +19,4 @@ arena runners: claude-fable-5-2-high, claude-opus-5-5-high-fast, gemini-4-carbon
 arena cross-judge pool: claude-fable-5-2-high, claude-opus-5-5-high-fast, gemini-4-carbon-high
 swarm workers: claude-opus-5-5-high-fast
 architect runners: claude-fable-5-2-high, claude-opus-5-5-high-fast, gemini-4-carbon-high
-interrogate reviewers: claude-opus-5-5-xhigh, gpt-6-astra
+interrogate reviewers: claude-opus-5-5, gpt-6-astra

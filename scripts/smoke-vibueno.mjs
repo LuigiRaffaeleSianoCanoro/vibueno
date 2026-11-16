@@ -4,8 +4,8 @@
  *
  *   node scripts/smoke-vibueno.mjs --base http://127.0.0.1:8788 --sha "$(git rev-parse HEAD)"
  */
-import { ROUTE_MARKERS } from '../hosted/routes.mjs';
-import { shaMatches } from './smoke-vibueno-lib.mjs';
+import { smokeRouteEntries } from '../hosted/routes.mjs';
+import { shaMatches, versionResponseOk } from './smoke-vibueno-lib.mjs';
 
 function arg(name) {
   const i = process.argv.indexOf(name);
@@ -25,7 +25,7 @@ if (!base) {
   process.exit(2);
 }
 
-const routes = [{ path: '/', marker: ROUTE_MARKERS.shell }];
+const routes = smokeRouteEntries();
 
 /** @type {import('./smoke-vibueno-lib.mjs').SmokeResult[]} */
 const results = [];
@@ -41,22 +41,25 @@ function record(name, ok, detail = {}) {
   if (!ok) failed += 1;
 }
 
-async function request(path) {
-  const res = await fetch(`${base}${path}`, { redirect: 'manual' });
-  const text = await res.text();
+async function request(path, method = 'GET') {
+  const res = await fetch(`${base}${path}`, { method, redirect: 'manual' });
+  const text = method === 'HEAD' ? '' : await res.text();
   return { status: res.status, text };
 }
 
 const ver = await request('/api/version');
-let servedSha = '';
+let versionBody = {};
 try {
-  const j = JSON.parse(ver.text);
-  servedSha = String(j.sha || '').toLowerCase();
+  versionBody = JSON.parse(ver.text);
 } catch {
   /* ignore */
 }
-const verOk = ver.status === 200 && servedSha && servedSha !== 'unknown';
-record('api/version', verOk, { status: ver.status, sha: servedSha });
+const servedSha = String(versionBody.sha || '').toLowerCase();
+record('api/version', versionResponseOk(ver.status, versionBody), {
+  status: ver.status,
+  sha: servedSha,
+  ok: versionBody.ok,
+});
 
 if (expectSha && !shaMatches(servedSha, expectSha)) {
   record('sha/merge', false, { expected: expectSha, served: servedSha });
@@ -71,6 +74,11 @@ for (const r of routes) {
     status: res.status,
     marker: r.marker,
   });
+}
+
+for (const path of ['/', '/api/version']) {
+  const head = await request(path, 'HEAD');
+  record(`HEAD ${path}`, head.status === 200, { status: head.status });
 }
 
 if (jsonOut) {

@@ -1,0 +1,66 @@
+# Manual deploy pipeline skeleton (FAB-190). No secrets in repo.
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Deploy target (preview | production)'
+        required: true
+        type: choice
+        options:
+          - preview
+          - production
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            hosted/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix hosted
+
+      - name: 1. Build single artifact
+        run: npm run build
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+
+      - name: 2–6. Deploy, smoke, promote, rollback (requires secrets)
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PREVIEW_URL: ${{ vars.VIBUENO_PREVIEW_URL }}
+          PROD_URL: ${{ vars.VIBUENO_PRODUCTION_URL }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CF_TOKEN:-}" ] || [ -z "${CF_ACCOUNT:-}" ]; then
+            echo "Steps 2–6 skipped: set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID to enable deploy."
+            echo "Intended order when configured:"
+            echo "  2) wrangler pages deploy hosted/public (preview)"
+            echo "  3) node scripts/smoke-vibueno.mjs --base \$PREVIEW_URL --sha \$GITHUB_SHA"
+            echo "  4) promote alias to production (when target=production)"
+            echo "  5) smoke production URL"
+            echo "  6) on failure, rollback to previous deployment"
+            exit 0
+          fi
+          echo "2) Would deploy preview artifact (not executed in FAB-190 foundation)."
+          if [ "$TARGET" = "preview" ] && [ -n "${PREVIEW_URL:-}" ]; then
+            echo "3) Would smoke $PREVIEW_URL"
+          fi
+          if [ "$TARGET" = "production" ]; then
+            echo "4–5) Would promote and smoke ${PROD_URL:-production}"
+          fi
+          echo "6) Rollback hook runs on job failure when smoke fails (wire in follow-up PR)."
