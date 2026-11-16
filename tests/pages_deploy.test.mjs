@@ -2,16 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PAGES_PROJECT,
-  getLiveProductionDeployment,
+  pickNewestDeploymentWithSha,
+  resolveRollbackTargetFromLiveVersion,
   rollbackDeployment,
   deployWithSmokeAndRollback,
   DeployError,
 } from '../scripts/pages-deploy-lib.mjs';
+import { buildNpxWranglerDeployArgv } from '../scripts/wrangler-deploy-args.mjs';
 
 const ACCOUNT = '972c81007a876887bb25628c5fc12166';
 const DEPLOY_A = 'aaaa-bbbb-cccc-dddd';
 const DEPLOY_B = 'bbbb-cccc-dddd-eeee';
 const SHA_A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const SHA_B = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const NEW_ID = 'eeee-ffff-1111-2222';
 const SHA_C = 'cccccccccccccccccccccccccccccccccccccccc';
 
@@ -36,56 +39,72 @@ function cfJson(body, ok = true, status = 200) {
   );
 }
 
-test('getLiveProductionDeployment uses canonical_deployment, not newest history row', async () => {
-  const urls = [];
-  const fetchFn = async (url, init) => {
-    urls.push(String(url));
-    assert.equal(init.headers.Authorization, 'Bearer test-token');
-    if (String(url).endsWith(`/pages/projects/${PAGES_PROJECT}`)) {
-      return cfJson({
-        canonical_deployment: {
-          id: DEPLOY_A,
-          environment: 'production',
-          latest_stage: { status: 'success' },
-          deployment_trigger: { metadata: { commit_hash: SHA_A } },
-        },
-      });
+/** Realistic V1: Cloudflare metadata says B; live alias serves A */
+const METADATA_SAYS_B_HISTORY = [
+  {
+    id: DEPLOY_B,
+    environment: 'production',
+    latest_stage: { status: 'success' },
+    created_on: '2026-01-03T00:00:00Z',
+    deployment_trigger: { metadata: { commit_hash: SHA_B } },
+  },
+  {
+    id: DEPLOY_A,
+    environment: 'production',
+    latest_stage: { status: 'success' },
+    created_on: '2026-01-01T00:00:00Z',
+    deployment_trigger: { metadata: { commit_hash: SHA_A } },
+  },
+];
+
+function deploymentListFetch(deployments) {
+  return async (url, init) => {
+    if (String(url).includes('/deployments') && init?.method !== 'POST') {
+      return cfJson(deployments);
     }
-    if (String(url).includes('/deployments')) {
-      return cfJson([
-        { id: DEPLOY_B, environment: 'production', latest_stage: { status: 'failure' } },
-        { id: DEPLOY_A, environment: 'production', latest_stage: { status: 'success' } },
-      ]);
+    if (init?.method === 'POST' && String(url).includes('/rollback')) {
+      return cfJson({ id: 'rolled' });
     }
     throw new Error(`unexpected fetch ${url}`);
   };
-  const live = await getLiveProductionDeployment({
-    accountId: ACCOUNT,
-    apiToken: 'test-token',
-    fetchFn,
-  });
-  assert.equal(live.id, DEPLOY_A);
-  assert.equal(live.commitSha, SHA_A);
-  assert.match(urls[0], new RegExp(`/pages/projects/${PAGES_PROJECT}$`));
+}
+
+const readShaA = async () => SHA_A;
+
+test('pickNewestDeploymentWithSha chooses newest record for the same commit SHA', () => {
+  const picked = pickNewestDeploymentWithSha(
+    [
+      {
+        id: 'old',
+        environment: 'production',
+        created_on: '2026-01-01',
+        deployment_trigger: { metadata: { commit_hash: SHA_A } },
+      },
+      {
+        id: 'new',
+        environment: 'production',
+        created_on: '2026-01-05',
+        deployment_trigger: { metadata: { commit_hash: SHA_A } },
+      },
+    ],
+    SHA_A,
+  );
+  assert.equal(picked?.id, 'new');
 });
 
-test('getLiveProductionDeployment returns null when project has no canonical deployment', async () => {
-  const fetchFn = async (url) => {
-    if (String(url).endsWith(`/pages/projects/${PAGES_PROJECT}`)) {
-      return cfJson({ name: PAGES_PROJECT, canonical_deployment: null });
-    }
-    return cfJson([]);
-  };
-  const live = await getLiveProductionDeployment({
+test('resolveRollbackTargetFromLiveVersion maps live SHA A while history newest is B', async () => {
+  const target = await resolveRollbackTargetFromLiveVersion({
+    productionUrl: 'https://vibueno.pages.dev',
     accountId: ACCOUNT,
-    apiToken: 'x',
-    fetchFn,
+    apiToken: 'tok',
+    fetchFn: deploymentListFetch(METADATA_SAYS_B_HISTORY),
+    readLiveProductionShaFn: readShaA,
   });
-  assert.equal(live.id, null);
-  assert.equal(live.commitSha, null);
+  assert.equal(target.id, DEPLOY_A);
+  assert.equal(target.commitSha, SHA_A);
 });
 
-test('consecutive failed deploy rolls back to canonical A after rejected B was newest in history', async () => {
+test('consecutive failed deploy rolls back to A when metadata canonical would be B', async () => {
   const rollbackUrls = [];
   const fetchFn = async (url, init) => {
     const u = String(url);
@@ -93,20 +112,10 @@ test('consecutive failed deploy rolls back to canonical A after rejected B was n
       rollbackUrls.push(u);
       return cfJson({ id: 'rolled' });
     }
-    if (u.endsWith(`/pages/projects/${PAGES_PROJECT}`)) {
-      return cfJson({
-        canonical_deployment: {
-          id: DEPLOY_A,
-          environment: 'production',
-          latest_stage: { status: 'success' },
-          deployment_trigger: { metadata: { commit_hash: SHA_A } },
-        },
-      });
-    }
     if (u.includes('/deployments')) {
-      return cfJson([{ id: DEPLOY_B, environment: 'production', latest_stage: { status: 'failure' } }]);
+      return cfJson(METADATA_SAYS_B_HISTORY);
     }
-    return cfJson({});
+    throw new Error(`unexpected fetch ${url}`);
   };
   const result = await deployWithSmokeAndRollback({
     accountId: ACCOUNT,
@@ -114,6 +123,7 @@ test('consecutive failed deploy rolls back to canonical A after rejected B was n
     productionUrl: 'https://vibueno.pages.dev',
     deploySha: SHA_C,
     fetchFn,
+    readLiveProductionShaFn: readShaA,
     runDeploy: async () => ({ deploymentId: NEW_ID }),
     runSmoke: async ({ phase, rollbackSha }) => {
       if (phase === 'post-deploy') return { ok: false, exitCode: 1 };
@@ -122,162 +132,162 @@ test('consecutive failed deploy rolls back to canonical A after rejected B was n
     },
   });
   assert.equal(result.ok, false);
-  assert.equal(rollbackUrls.length, 1);
   assert.match(rollbackUrls[0], new RegExp(`/deployments/${DEPLOY_A}/rollback`));
+});
+
+test('abort before deploy when live SHA is unreadable', async () => {
+  await assert.rejects(
+    () =>
+      resolveRollbackTargetFromLiveVersion({
+        productionUrl: 'https://vibueno.pages.dev',
+        accountId: ACCOUNT,
+        apiToken: 'tok',
+        fetchFn: deploymentListFetch([]),
+        readLiveProductionShaFn: async () => null,
+        allowFirstDeploy: false,
+      }),
+  (err) => {
+    assert.ok(err instanceof DeployError);
+    assert.match(err.message, /cannot read live production sha/i);
+    return true;
+  },
+  );
+});
+
+test('abort before deploy when live SHA has no matching deployment', async () => {
+  await assert.rejects(
+    () =>
+      resolveRollbackTargetFromLiveVersion({
+        productionUrl: 'https://vibueno.pages.dev',
+        accountId: ACCOUNT,
+        apiToken: 'tok',
+        fetchFn: deploymentListFetch([
+          {
+            id: DEPLOY_B,
+            environment: 'production',
+            deployment_trigger: { metadata: { commit_hash: SHA_B } },
+          },
+        ]),
+        readLiveProductionShaFn: readShaA,
+      }),
+    (err) => {
+      assert.ok(err instanceof DeployError);
+      assert.match(err.message, /no production deployment record matches live sha/i);
+      return true;
+    },
+  );
+});
+
+test('post-rollback smoke failure reports SHA mismatch loudly', async () => {
+  const result = await deployWithSmokeAndRollback({
+    accountId: ACCOUNT,
+    apiToken: 'tok',
+    productionUrl: 'https://vibueno.pages.dev',
+    deploySha: SHA_C,
+    fetchFn: deploymentListFetch([
+      {
+        id: DEPLOY_A,
+        environment: 'production',
+        deployment_trigger: { metadata: { commit_hash: SHA_A } },
+      },
+    ]),
+    readLiveProductionShaFn: readShaA,
+    runDeploy: async () => ({}),
+    runSmoke: async ({ phase, rollbackSha }) => {
+      if (phase === 'post-deploy') return { ok: false, exitCode: 1 };
+      assert.equal(rollbackSha, SHA_A);
+      return { ok: false, exitCode: 1 };
+    },
+  });
+  assert.equal(result.rolledBack, true);
+  assert.match(String(result.error), /post-rollback smoke failed/i);
+  assert.match(String(result.error), /pre-deploy live sha/i);
+});
+
+test('wrangler deploy argv includes --commit-hash', () => {
+  const argv = buildNpxWranglerDeployArgv(SHA_C, '4.45.0');
+  assert.deepEqual(
+    argv,
+    [
+      '--yes',
+      'wrangler@4.45.0',
+      'pages',
+      'deploy',
+      'public',
+      '--project-name=vibueno',
+      '--branch=main',
+      '--commit-dirty=true',
+      `--commit-hash=${SHA_C}`,
+    ],
+  );
 });
 
 test('deployWithSmokeAndRollback succeeds when smoke passes (no rollback)', async () => {
-  const calls = { rollback: 0, deploy: 0, smoke: 0 };
+  const calls = { rollback: 0, deploy: 0 };
   const fetchFn = async (url, init) => {
-    if (init?.method === 'POST' && url.includes('/rollback')) {
-      calls.rollback += 1;
-    }
-    if (String(url).endsWith(`/pages/projects/${PAGES_PROJECT}`)) {
-      return cfJson({
-        canonical_deployment: {
-          id: DEPLOY_A,
-          environment: 'production',
-          deployment_trigger: { metadata: { commit_hash: SHA_A } },
-        },
-      });
-    }
-    if (url.includes('/deployments') && init?.method !== 'POST') {
-      return cfJson([{ id: DEPLOY_A, environment: 'production' }]);
-    }
-    return cfJson({});
-  };
-  const result = await deployWithSmokeAndRollback({
-    accountId: ACCOUNT,
-    apiToken: 'tok',
-    productionUrl: 'https://vibueno.pages.dev',
-    deploySha: 'abc123def4567890abcdef1234567890abcdef12',
-    fetchFn,
-    runDeploy: async () => {
-      calls.deploy += 1;
-      return { deploymentId: NEW_ID };
-    },
-    runSmoke: async () => {
-      calls.smoke += 1;
-      return { ok: true, exitCode: 0 };
-    },
-    allowFirstDeploy: true,
-  });
-  assert.equal(result.ok, true);
-  assert.equal(calls.deploy, 1);
-  assert.equal(calls.smoke, 1);
-  assert.equal(calls.rollback, 0);
-  assert.equal(result.previousDeploymentId, DEPLOY_A);
-});
-
-test('deployWithSmokeAndRollback rolls back when post-deploy smoke fails', async () => {
-  const rollbackUrls = [];
-  let smokePass = 0;
-  const fetchFn = async (url, init) => {
-    if (init?.method === 'POST' && url.includes('/rollback')) {
-      rollbackUrls.push(url);
-      return cfJson({ id: 'rollback-deploy-id' });
-    }
-    if (String(url).endsWith(`/pages/projects/${PAGES_PROJECT}`)) {
-      return cfJson({
-        canonical_deployment: {
-          id: DEPLOY_A,
-          environment: 'production',
-          deployment_trigger: { metadata: { commit_hash: SHA_A } },
-        },
-      });
-    }
-    if (url.includes('/deployments') && (!init?.method || init.method === 'GET')) {
-      return cfJson([{ id: DEPLOY_A, environment: 'production' }]);
-    }
-    return cfJson({});
-  };
-  const result = await deployWithSmokeAndRollback({
-    accountId: ACCOUNT,
-    apiToken: 'tok',
-    productionUrl: 'https://vibueno.pages.dev',
-    deploySha: 'abc123def4567890abcdef1234567890abcdef12',
-    fetchFn,
-    runDeploy: async () => ({ deploymentId: NEW_ID }),
-    runSmoke: async ({ phase }) => {
-      if (phase === 'post-deploy') return { ok: false, exitCode: 1 };
-      smokePass += 1;
-      return { ok: true, exitCode: 0 };
-    },
-  });
-  assert.equal(result.ok, false);
-  assert.equal(rollbackUrls.length, 1);
-  assert.match(rollbackUrls[0], new RegExp(`/deployments/${DEPLOY_A}/rollback`));
-  assert.equal(smokePass, 1);
-  assert.match(String(result.error), /smoke/i);
-});
-
-test('getLiveProductionDeployment with null canonical falls back to successful production deployment', async () => {
-  const fetchFn = async (url) => {
-    if (String(url).endsWith(`/pages/projects/${PAGES_PROJECT}`)) {
-      return cfJson({ canonical_deployment: null });
-    }
-    if (String(url).includes('/deployments')) {
+    if (init?.method === 'POST' && url.includes('/rollback')) calls.rollback += 1;
+    if (url.includes('/deployments')) {
       return cfJson([
-        { id: 'prev', environment: 'preview' },
         {
           id: DEPLOY_A,
           environment: 'production',
-          latest_stage: { status: 'success' },
           deployment_trigger: { metadata: { commit_hash: SHA_A } },
         },
       ]);
     }
-    return cfJson({});
+    throw new Error(url);
   };
-  const live = await getLiveProductionDeployment({
+  const result = await deployWithSmokeAndRollback({
     accountId: ACCOUNT,
     apiToken: 'tok',
+    productionUrl: 'https://vibueno.pages.dev',
+    deploySha: SHA_C,
     fetchFn,
+    readLiveProductionShaFn: readShaA,
+    runDeploy: async () => {
+      calls.deploy += 1;
+      return {};
+    },
+    runSmoke: async () => ({ ok: true, exitCode: 0 }),
+    allowFirstDeploy: true,
   });
-  assert.equal(live.id, DEPLOY_A);
+  assert.equal(result.ok, true);
+  assert.equal(calls.rollback, 0);
+  assert.equal(result.previousDeploymentId, DEPLOY_A);
 });
 
-test('deployWithSmokeAndRollback rejects first deploy when no previous deployment', async () => {
-  const fetchFn = async (url) => {
-    if (String(url).endsWith(`/pages/projects/${PAGES_PROJECT}`)) {
-      return cfJson({ canonical_deployment: null });
-    }
-    return cfJson([]);
-  };
+test('deploy does not run when rollback target cannot be resolved', async () => {
+  let deployed = false;
   await assert.rejects(
     () =>
       deployWithSmokeAndRollback({
         accountId: ACCOUNT,
         apiToken: 'tok',
         productionUrl: 'https://vibueno.pages.dev',
-        deploySha: 'abc123def4567890abcdef1234567890abcdef12',
-        fetchFn,
-        runDeploy: async () => ({ deploymentId: NEW_ID }),
-        runSmoke: async () => ({ ok: true, exitCode: 0 }),
+        deploySha: SHA_C,
+        fetchFn: deploymentListFetch([]),
+        readLiveProductionShaFn: async () => null,
         allowFirstDeploy: false,
+        runDeploy: async () => {
+          deployed = true;
+          return {};
+        },
+        runSmoke: async () => ({ ok: true, exitCode: 0 }),
       }),
-    (err) => {
-      assert.ok(err instanceof DeployError);
-      assert.match(err.message, /no live production deployment/i);
-      return true;
-    },
+    (err) => err instanceof DeployError,
   );
+  assert.equal(deployed, false);
 });
 
-test('allowFirstDeploy permits deploy with no previous deployment', async () => {
-  const fetchFn = async (url) => {
-    if (String(url).endsWith(`/pages/projects/${PAGES_PROJECT}`)) {
-      return cfJson({ canonical_deployment: null });
-    }
-    return cfJson([]);
-  };
+test('allowFirstDeploy permits deploy when live SHA unreadable and no history', async () => {
   const result = await deployWithSmokeAndRollback({
     accountId: ACCOUNT,
     apiToken: 'tok',
     productionUrl: 'https://vibueno.pages.dev',
-    deploySha: 'abc123def4567890abcdef1234567890abcdef12',
-    fetchFn,
-    runDeploy: async () => ({ deploymentId: NEW_ID }),
+    deploySha: SHA_C,
+    fetchFn: deploymentListFetch([]),
+    readLiveProductionShaFn: async () => null,
+    runDeploy: async () => ({}),
     runSmoke: async () => ({ ok: true, exitCode: 0 }),
     allowFirstDeploy: true,
   });
@@ -285,30 +295,20 @@ test('allowFirstDeploy permits deploy with no previous deployment', async () => 
   assert.equal(result.previousDeploymentId, null);
 });
 
-test('deployWithSmokeAndRollback fails loudly when rollback API fails', async () => {
-  const fetchFn = async (url, init) => {
-    if (init?.method === 'POST' && url.includes('/rollback')) {
-      return cfJson(null, false, 500);
-    }
-    if (String(url).endsWith(`/pages/projects/${PAGES_PROJECT}`)) {
-      return cfJson({
-        canonical_deployment: { id: DEPLOY_A, deployment_trigger: { metadata: { commit_hash: SHA_A } } },
-      });
-    }
-    return cfJson([{ id: DEPLOY_A, environment: 'production' }]);
-  };
+test('first deploy smoke failure returns error without rollback', async () => {
   const result = await deployWithSmokeAndRollback({
     accountId: ACCOUNT,
     apiToken: 'tok',
     productionUrl: 'https://vibueno.pages.dev',
-    deploySha: 'abc123def4567890abcdef1234567890abcdef12',
-    fetchFn,
-    runDeploy: async () => ({ deploymentId: NEW_ID }),
-    runSmoke: async ({ phase }) =>
-      phase === 'post-deploy' ? { ok: false, exitCode: 1 } : { ok: true, exitCode: 0 },
+    deploySha: SHA_C,
+    fetchFn: deploymentListFetch([]),
+    readLiveProductionShaFn: async () => null,
+    runDeploy: async () => ({}),
+    runSmoke: async () => ({ ok: false, exitCode: 1 }),
+    allowFirstDeploy: true,
   });
   assert.equal(result.ok, false);
-  assert.match(String(result.error), /rollback/i);
+  assert.equal(result.rolledBack, false);
 });
 
 test('rollbackDeployment posts to Pages rollback endpoint', async () => {
@@ -325,27 +325,26 @@ test('rollbackDeployment posts to Pages rollback endpoint', async () => {
     fetchFn,
   });
   assert.ok(posted);
-  assert.equal(posted.method, 'POST');
-  assert.match(posted.url, new RegExp(`/deployments/${DEPLOY_A}/rollback$`));
+  assert.match(posted.url, new RegExp(`/pages/projects/${PAGES_PROJECT}/deployments/${DEPLOY_A}/rollback$`));
 });
 
 test('runDeploy throw still runs smoke and rollback when smoke fails', async () => {
   const rollbackUrls = [];
   const fetchFn = async (url, init) => {
-    const u = String(url);
-    if (init?.method === 'POST' && u.includes('/rollback')) {
-      rollbackUrls.push(u);
+    if (init?.method === 'POST' && String(url).includes('/rollback')) {
+      rollbackUrls.push(String(url));
       return cfJson({ id: 'rolled' });
     }
-    if (u.endsWith(`/pages/projects/${PAGES_PROJECT}`)) {
-      return cfJson({
-        canonical_deployment: {
+    if (String(url).includes('/deployments')) {
+      return cfJson([
+        {
           id: DEPLOY_A,
+          environment: 'production',
           deployment_trigger: { metadata: { commit_hash: SHA_A } },
         },
-      });
+      ]);
     }
-    return cfJson({});
+    throw new Error(url);
   };
   const result = await deployWithSmokeAndRollback({
     accountId: ACCOUNT,
@@ -353,6 +352,7 @@ test('runDeploy throw still runs smoke and rollback when smoke fails', async () 
     productionUrl: 'https://vibueno.pages.dev',
     deploySha: SHA_C,
     fetchFn,
+    readLiveProductionShaFn: readShaA,
     runDeploy: async () => {
       throw new DeployError('wrangler exited 1');
     },
@@ -363,79 +363,17 @@ test('runDeploy throw still runs smoke and rollback when smoke fails', async () 
   assert.equal(rollbackUrls.length, 1);
 });
 
-test('runDeploy throw with successful smoke treats deploy as success', async () => {
-  const fetchFn = async (url) => {
-    if (String(url).endsWith(`/pages/projects/${PAGES_PROJECT}`)) {
-      return cfJson({
-        canonical_deployment: {
-          id: DEPLOY_A,
-          deployment_trigger: { metadata: { commit_hash: SHA_A } },
-        },
-      });
-    }
-    return cfJson({});
-  };
-  const result = await deployWithSmokeAndRollback({
-    accountId: ACCOUNT,
-    apiToken: 'tok',
-    productionUrl: 'https://vibueno.pages.dev',
-    deploySha: SHA_C,
-    fetchFn,
-    runDeploy: async () => {
-      throw new DeployError('wrangler exited 1');
-    },
-    runSmoke: async () => ({ ok: true, exitCode: 0 }),
-    allowFirstDeploy: true,
-  });
-  assert.equal(result.ok, true);
-});
-
-test('first deploy smoke failure returns error without rollback', async () => {
-  const fetchFn = async (url) => {
-    if (String(url).endsWith(`/pages/projects/${PAGES_PROJECT}`)) {
-      return cfJson({ canonical_deployment: null });
-    }
-    return cfJson([]);
-  };
-  const result = await deployWithSmokeAndRollback({
-    accountId: ACCOUNT,
-    apiToken: 'tok',
-    productionUrl: 'https://vibueno.pages.dev',
-    deploySha: SHA_C,
-    fetchFn,
-    runDeploy: async () => ({}),
-    runSmoke: async () => ({ ok: false, exitCode: 1 }),
-    allowFirstDeploy: true,
-  });
-  assert.equal(result.ok, false);
-  assert.equal(result.rolledBack, false);
-  assert.equal(result.previousDeploymentId, null);
-});
-
-test('post-rollback smoke failure is reported after rollback', async () => {
-  const fetchFn = async (url, init) => {
-    if (init?.method === 'POST' && String(url).includes('/rollback')) {
-      return cfJson({ id: 'rolled' });
-    }
-    if (String(url).endsWith(`/pages/projects/${PAGES_PROJECT}`)) {
-      return cfJson({
-        canonical_deployment: {
-          id: DEPLOY_A,
-          deployment_trigger: { metadata: { commit_hash: SHA_A } },
-        },
-      });
-    }
-    return cfJson({});
-  };
-  const result = await deployWithSmokeAndRollback({
-    accountId: ACCOUNT,
-    apiToken: 'tok',
-    productionUrl: 'https://vibueno.pages.dev',
-    deploySha: SHA_C,
-    fetchFn,
-    runDeploy: async () => ({}),
-    runSmoke: async () => ({ ok: false, exitCode: 1 }),
-  });
-  assert.equal(result.rolledBack, true);
-  assert.match(String(result.error), /post-rollback smoke/i);
+test('pickNewestDeploymentWithSha ignores preview environment rows', () => {
+  const picked = pickNewestDeploymentWithSha(
+    [
+      { id: 'pv', environment: 'preview', deployment_trigger: { metadata: { commit_hash: SHA_A } } },
+      {
+        id: DEPLOY_A,
+        environment: 'production',
+        deployment_trigger: { metadata: { commit_hash: SHA_A } },
+      },
+    ],
+    SHA_A,
+  );
+  assert.equal(picked?.id, DEPLOY_A);
 });

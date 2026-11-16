@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { deployWithSmokeAndRollback, DeployError } from './pages-deploy-lib.mjs';
 import { smokeWithBackoff } from './smoke-retry.mjs';
+import { buildNpxWranglerDeployArgv, buildWranglerPagesDeployArgs } from './wrangler-deploy-args.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..');
@@ -20,6 +21,7 @@ const deploySha = (process.env.GITHUB_SHA || process.env.DEPLOY_SHA || '').trim(
 const productionUrl = (process.env.VIBUENO_PRODUCTION_URL || 'https://vibueno.pages.dev').trim();
 const allowFirstDeploy = process.env.VIBUENO_ALLOW_FIRST_DEPLOY === 'true';
 const wranglerBin = process.env.WRANGLER_BIN || 'npx';
+const wranglerVersion = process.env.WRANGLER_VERSION || '4.45.0';
 
 function runCommand(cmd, args, options = {}) {
   return new Promise((resolvePromise, reject) => {
@@ -36,21 +38,12 @@ function runSmokeCli(base, sha) {
 }
 
 async function wranglerDeploy() {
-  const wranglerVersion = process.env.WRANGLER_VERSION || '4.45.0';
-  const deployArgs = [
-    'pages',
-    'deploy',
-    'public',
-    '--project-name=vibueno',
-    '--branch=main',
-    '--commit-dirty=true',
-  ];
-  const cmd = wranglerBin === 'npx' ? 'npx' : wranglerBin;
-  const args =
+  const deployArgs =
     wranglerBin === 'npx'
-      ? ['--yes', `wrangler@${wranglerVersion}`, ...deployArgs]
-      : deployArgs;
-  const code = await runCommand(cmd, args, {
+      ? buildNpxWranglerDeployArgv(deploySha, wranglerVersion)
+      : buildWranglerPagesDeployArgs(deploySha);
+  const cmd = wranglerBin === 'npx' ? 'npx' : wranglerBin;
+  const code = await runCommand(cmd, deployArgs, {
     cwd: hostedDir,
     env: {
       ...process.env,
@@ -82,10 +75,17 @@ async function main() {
     allowFirstDeploy,
     runDeploy: wranglerDeploy,
     runSmoke: async ({ phase, base, sha, rollbackSha }) => {
-      const expectSha =
-        phase === 'post-deploy' ? sha : phase === 'post-rollback' ? rollbackSha ?? '' : '';
+      let expectSha;
+      if (phase === 'post-deploy') {
+        expectSha = sha;
+      } else {
+        if (!rollbackSha || !/^[0-9a-f]{40}$/.test(rollbackSha)) {
+          return { ok: false, exitCode: 1 };
+        }
+        expectSha = rollbackSha;
+      }
       const retry = await smokeWithBackoff({
-        runSmoke: () => runSmokeCli(base, expectSha || undefined),
+        runSmoke: () => runSmokeCli(base, expectSha),
       });
       return { ok: retry.ok, exitCode: retry.lastExitCode };
     },

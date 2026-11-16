@@ -1,7 +1,8 @@
 /**
- * Cloudflare Pages production deploy orchestration: record live production deployment,
+ * Cloudflare Pages production deploy orchestration: live /api/version rollback target,
  * smoke after deploy, rollback on smoke failure.
  */
+import { readLiveProductionSha } from './live-production-version.mjs';
 
 export const PAGES_PROJECT = 'vibueno';
 
@@ -35,26 +36,27 @@ export function commitShaFromDeployment(deployment) {
 }
 
 /**
- * @param {unknown} deployment
+ * Pick the newest production deployment whose metadata commit matches `liveSha`.
+ *
+ * @param {Array<unknown>} deployments
+ * @param {string} liveSha
+ * @returns {{ id: string; commitSha: string } | null}
  */
-function deploymentIsProductionCandidate(deployment) {
-  if (!deployment || typeof deployment !== 'object') return false;
-  const env = /** @type {{ environment?: string; latest_stage?: { status?: string } }} */ (deployment);
-  if (env.environment && env.environment !== 'production') return false;
-  const stage = env.latest_stage?.status;
-  if (stage && stage !== 'success') return false;
-  const id = /** @type {{ id?: string }} */ (deployment).id;
-  return Boolean(id);
-}
-
-/**
- * @param {unknown} deployment
- * @returns {{ id: string; commitSha: string | null } | null}
- */
-function recordFromDeployment(deployment) {
-  if (!deploymentIsProductionCandidate(deployment)) return null;
-  const id = String(/** @type {{ id: string }} */ (deployment).id);
-  return { id, commitSha: commitShaFromDeployment(deployment) };
+export function pickNewestDeploymentWithSha(deployments, liveSha) {
+  const target = liveSha.toLowerCase();
+  /** @type {Array<{ id: string; created: string }>} */
+  const matches = [];
+  for (const entry of deployments) {
+    if (!entry || typeof entry !== 'object') continue;
+    const env = /** @type {{ environment?: string; id?: string; created_on?: string }} */ (entry);
+    if (env.environment && env.environment !== 'production') continue;
+    const sha = commitShaFromDeployment(entry);
+    if (sha !== target || !env.id) continue;
+    matches.push({ id: String(env.id), created: String(env.created_on ?? '') });
+  }
+  matches.sort((a, b) => (a.created < b.created ? 1 : a.created > b.created ? -1 : 0));
+  const best = matches[0];
+  return best ? { id: best.id, commitSha: target } : null;
 }
 
 /**
@@ -62,47 +64,70 @@ function recordFromDeployment(deployment) {
  * @param {string} opts.accountId
  * @param {string} opts.apiToken
  * @param {typeof fetch} [opts.fetchFn]
- * @returns {Promise<{ id: string | null; commitSha: string | null }>}
  */
-export async function getLiveProductionDeployment({ accountId, apiToken, fetchFn = fetch }) {
+export async function listProductionDeployments({ accountId, apiToken, fetchFn = fetch }) {
   const headers = { Authorization: `Bearer ${apiToken}` };
-
-  const projectRes = await fetchFn(pagesApiOrigin(accountId), { headers });
-  const projectBody = await projectRes.json();
-  if (!projectRes.ok || projectBody.success === false) {
-    throw new DeployError(
-      `Failed to load Pages project: HTTP ${projectRes.status} ${JSON.stringify(projectBody.errors ?? projectBody)}`,
-    );
+  /** @type {Array<unknown>} */
+  const all = [];
+  let page = 1;
+  for (;;) {
+    const url = `${pagesApiOrigin(accountId)}/deployments?env=production&per_page=25&page=${page}`;
+    const res = await fetchFn(url, { headers });
+    const body = await res.json();
+    if (!res.ok || body.success === false) {
+      throw new DeployError(
+        `Failed to list production deployments: HTTP ${res.status} ${JSON.stringify(body.errors ?? body)}`,
+      );
+    }
+    const chunk = /** @type {Array<unknown>} */ (body.result ?? []);
+    all.push(...chunk);
+    if (chunk.length < 25) break;
+    page += 1;
+    if (page > 20) break;
   }
-
-  const canonical = projectBody.result?.canonical_deployment;
-  const fromCanonical = recordFromDeployment(canonical);
-  if (fromCanonical) {
-    return { id: fromCanonical.id, commitSha: fromCanonical.commitSha };
-  }
-
-  const listUrl = `${pagesApiOrigin(accountId)}/deployments?env=production&per_page=25`;
-  const listRes = await fetchFn(listUrl, { headers });
-  const listBody = await listRes.json();
-  if (!listRes.ok || listBody.success === false) {
-    throw new DeployError(
-      `Failed to list production deployments: HTTP ${listRes.status} ${JSON.stringify(listBody.errors ?? listBody)}`,
-    );
-  }
-
-  const list = /** @type {Array<unknown>} */ (listBody.result ?? []);
-  for (const entry of list) {
-    const rec = recordFromDeployment(entry);
-    if (rec) return { id: rec.id, commitSha: rec.commitSha };
-  }
-
-  return { id: null, commitSha: null };
+  return all;
 }
 
-/** @deprecated Use getLiveProductionDeployment */
-export async function getProductionDeploymentId(opts) {
-  const live = await getLiveProductionDeployment(opts);
-  return live.id;
+/**
+ * Resolve rollback target from live production /api/version SHA (not Cloudflare canonical metadata).
+ *
+ * @param {object} opts
+ * @param {string} opts.productionUrl
+ * @param {string} opts.accountId
+ * @param {string} opts.apiToken
+ * @param {typeof fetch} [opts.fetchFn]
+ * @param {boolean} [opts.allowFirstDeploy]
+ * @param {typeof readLiveProductionSha} [opts.readLiveProductionShaFn]
+ * @returns {Promise<{ id: string | null; commitSha: string | null }>}
+ */
+export async function resolveRollbackTargetFromLiveVersion({
+  productionUrl,
+  accountId,
+  apiToken,
+  fetchFn = fetch,
+  allowFirstDeploy = false,
+  readLiveProductionShaFn = readLiveProductionSha,
+}) {
+  const liveSha = await readLiveProductionShaFn(productionUrl, fetchFn);
+
+  if (!liveSha) {
+    if (allowFirstDeploy) {
+      return { id: null, commitSha: null };
+    }
+    throw new DeployError(
+      'Cannot read live production SHA from GET /api/version before deploy. Aborting (no guess from Pages metadata).',
+    );
+  }
+
+  const deployments = await listProductionDeployments({ accountId, apiToken, fetchFn });
+  const match = pickNewestDeploymentWithSha(deployments, liveSha);
+  if (!match) {
+    throw new DeployError(
+      `No production deployment record matches live SHA ${liveSha}. Aborting before deploy.`,
+    );
+  }
+
+  return { id: match.id, commitSha: liveSha };
 }
 
 /**
@@ -152,6 +177,7 @@ export async function rollbackDeployment({ accountId, apiToken, deploymentId, fe
  * @param {RunDeployFn} opts.runDeploy
  * @param {RunSmokeFn} opts.runSmoke
  * @param {boolean} [opts.allowFirstDeploy]
+ * @param {typeof readLiveProductionSha} [opts.readLiveProductionShaFn]
  */
 export async function deployWithSmokeAndRollback({
   accountId,
@@ -162,9 +188,17 @@ export async function deployWithSmokeAndRollback({
   runDeploy,
   runSmoke,
   allowFirstDeploy = false,
+  readLiveProductionShaFn,
 }) {
   const base = productionUrl.replace(/\/$/, '');
-  const liveBefore = await getLiveProductionDeployment({ accountId, apiToken, fetchFn });
+  const liveBefore = await resolveRollbackTargetFromLiveVersion({
+    productionUrl,
+    accountId,
+    apiToken,
+    fetchFn,
+    allowFirstDeploy,
+    readLiveProductionShaFn,
+  });
   const previousDeploymentId = liveBefore.id;
   const previousCommitSha = liveBefore.commitSha;
 
@@ -229,6 +263,19 @@ export async function deployWithSmokeAndRollback({
     };
   }
 
+  if (!previousCommitSha) {
+    return {
+      ok: false,
+      previousDeploymentId,
+      previousCommitSha: null,
+      rolledBack: true,
+      deployHadError: Boolean(deployError),
+      error: new DeployError(
+        'Post-rollback smoke requires previous live SHA but none was recorded. Production state is ambiguous.',
+      ),
+    };
+  }
+
   const postRollbackSmoke = await runSmoke({
     phase: 'post-rollback',
     base,
@@ -243,7 +290,7 @@ export async function deployWithSmokeAndRollback({
       rolledBack: true,
       deployHadError: Boolean(deployError),
       error: new DeployError(
-        'Rolled back to previous deployment but post-rollback smoke still failed (production may be unhealthy).',
+        'Rolled back to previous deployment but post-rollback smoke failed: /api/version did not match the pre-deploy live SHA.',
       ),
     };
   }
