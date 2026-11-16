@@ -24,12 +24,12 @@ Multi-tenant white-label SaaS foundation (content approval, AI planning via Verc
 | No secrets in repo | `.gitignore`, review; gateway auth via `NEON_AI_GATEWAY_*` / Vercel `AI_GATEWAY_API_KEY` in env only |
 | Valid build SHA only (no `unknown`, no dirty tree) | `hosted/build-sha.mjs`; `GET /api/version` returns `ok:false` when bundle invalid; `tests/build_sha.test.mjs` |
 | Static assets + HEAD on routes | `hosted/worker.js` → `env.ASSETS.fetch`; HEAD for `/` and `/api/version` |
-| Deploy smoke + rollback path | `.github/workflows/deploy.yml` (manual, secret-gated skeleton) |
+| Deploy smoke + rollback path | `.github/workflows/deploy.yml` + `scripts/pages-deploy-lib.mjs` / `scripts/run-production-deploy.mjs` |
 | Adversarial reviewers use Opus + Astra (not the author model) | `.cursor/rules/pstack-models.mdc` → `interrogate reviewers` |
 | Evidence before "listo" | `.cursor/skills/verify-vibueno/SKILL.md` + `vibueno-feature-map.yaml` |
 | Post-deploy read-only smoke | `scripts/smoke-vibueno.mjs` |
 | New interactive UI uses Vercel UI SDK (`@ui-sdk/*`) with brand theme | Convention documented in `docs/decisions.md` (applied when UI ships) |
-| Agents do not write production DBs from this repo until creds are scoped | No D1 bindings in foundation PR; migrations only on preview/local later |
+| Agents do not write production DBs from this repo until creds are scoped | Wrangler D1/KV bindings are configured but Worker code does not query them yet; no migrations from CI |
 
 ## Layout
 
@@ -50,3 +50,16 @@ npm run build
 cd hosted && npx wrangler pages dev public --port 8788
 node scripts/smoke-vibueno.mjs --base http://127.0.0.1:8788 --sha "$(git rev-parse HEAD)"
 ```
+
+## Deploy secrets (GitHub Actions)
+
+Set repository secrets (never commit):
+
+| Secret | Value |
+|--------|--------|
+| `CLOUDFLARE_API_TOKEN` | API token with **Account → Cloudflare Pages — Edit** on account `972c81007a876887bb25628c5fc12166` (minimal: Pages Edit only; add **D1 — Edit** only if a future deploy step runs migrations) |
+| `CLOUDFLARE_ACCOUNT_ID` | `972c81007a876887bb25628c5fc12166` |
+
+Optional repository variables: `VIBUENO_PRODUCTION_URL` (default `https://vibueno.pages.dev`), `VIBUENO_ALLOW_FIRST_DEPLOY=true` for the first upload when no prior production deployment exists.
+
+When secrets are missing, the **Deploy** workflow finishes successfully with a notice (CI is unchanged).

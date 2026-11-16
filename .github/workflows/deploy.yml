@@ -1,23 +1,42 @@
-# Manual deploy pipeline skeleton (FAB-190). No secrets in repo.
+# Production deploy: single artifact, post-deploy smoke, auto-rollback (FAB-190 follow-up).
 name: Deploy
 
 on:
   workflow_dispatch:
-    inputs:
-      target:
-        description: 'Deploy target (preview | production)'
-        required: true
-        type: choice
-        options:
-          - preview
-          - production
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
 
 jobs:
   deploy:
     name: deploy
     runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.event == 'push')
+    permissions:
+      contents: read
     steps:
+      - name: Resolve deploy SHA
+        id: meta
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -32,35 +51,37 @@ jobs:
           npm ci
           npm ci --prefix hosted
 
-      - name: 1. Build single artifact
-        run: npm run build
+      - name: Check Cloudflare secrets
+        id: cf
         env:
-          GITHUB_SHA: ${{ github.sha }}
-
-      - name: 2–6. Deploy, smoke, promote, rollback (requires secrets)
-        env:
-          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          PREVIEW_URL: ${{ vars.VIBUENO_PREVIEW_URL }}
-          PROD_URL: ${{ vars.VIBUENO_PRODUCTION_URL }}
-          TARGET: ${{ inputs.target }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          if [ -z "${CF_TOKEN:-}" ] || [ -z "${CF_ACCOUNT:-}" ]; then
-            echo "Steps 2–6 skipped: set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID to enable deploy."
-            echo "Intended order when configured:"
-            echo "  2) wrangler pages deploy hosted/public (preview)"
-            echo "  3) node scripts/smoke-vibueno.mjs --base \$PREVIEW_URL --sha \$GITHUB_SHA"
-            echo "  4) promote alias to production (when target=production)"
-            echo "  5) smoke production URL"
-            echo "  6) on failure, rollback to previous deployment"
-            exit 0
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Deploy skipped: add repository secrets CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (see AGENTS.md / README)."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "2) Would deploy preview artifact (not executed in FAB-190 foundation)."
-          if [ "$TARGET" = "preview" ] && [ -n "${PREVIEW_URL:-}" ]; then
-            echo "3) Would smoke $PREVIEW_URL"
-          fi
-          if [ "$TARGET" = "production" ]; then
-            echo "4–5) Would promote and smoke ${PROD_URL:-production}"
-          fi
-          echo "6) Rollback hook runs on job failure when smoke fails (wire in follow-up PR)."
+
+      - name: Build single artifact
+        if: steps.cf.outputs.skip != 'true'
+        run: npm run build
+        env:
+          GITHUB_SHA: ${{ steps.meta.outputs.sha }}
+
+      - name: Skip notice
+        if: steps.cf.outputs.skip == 'true'
+        run: echo "Deploy not run (Cloudflare secrets not configured)."
+
+      - name: Deploy, smoke, rollback
+        if: steps.cf.outputs.skip != 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GITHUB_SHA: ${{ steps.meta.outputs.sha }}
+          VIBUENO_PRODUCTION_URL: ${{ vars.VIBUENO_PRODUCTION_URL }}
+          VIBUENO_ALLOW_FIRST_DEPLOY: ${{ vars.VIBUENO_ALLOW_FIRST_DEPLOY }}
+          WRANGLER_VERSION: '4.45.0'
+        run: node scripts/run-production-deploy.mjs

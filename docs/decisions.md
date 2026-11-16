@@ -39,4 +39,21 @@
 
 **Decision:** Add `.github/workflows/deploy.yml` (`workflow_dispatch` only). It builds the single artifact and documents the intended order (preview deploy → smoke → promote → prod smoke → rollback on failure). Real wrangler deploy steps stay gated on `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` (not set in foundation).
 
-**Status:** Skeleton merged with FAB-190; live deploy in a follow-up issue/PR.
+**Status:** Superseded by live deploy workflow below (FAB-190 follow-up).
+
+## 2026-11-16 — Live production deploy with smoke and auto-rollback
+
+**Context:** Cloudflare Pages project `vibueno` exists (direct upload, `vibueno.pages.dev`). Foundation shipped a secret-gated deploy skeleton; FAB-190 follow-up wires real deploy without splitting the Worker/templates artifact.
+
+**Decision:**
+
+- **Single artifact:** `npm run build` → `wrangler pages deploy hosted/public` with **wrangler 4.45.0** (pinned in workflow).
+- **Triggers:** `workflow_run` after **CI** succeeds on `push` to `main`, plus `workflow_dispatch`. No `pull_request_target`.
+- **Smoke:** `scripts/smoke-vibueno.mjs` with bounded backoff (`scripts/smoke-retry.mjs`, ~2 min); production URL defaults to `https://vibueno.pages.dev`.
+- **Rollback:** `scripts/pages-deploy-lib.mjs` records the current production deployment id, rolls back on smoke failure (`POST …/deployments/{id}/rollback`), then re-smokes without requiring the failed commit SHA. First deploy requires `VIBUENO_ALLOW_FIRST_DEPLOY=true` when no prior deployment exists.
+- **Bindings:** `hosted/wrangler.toml` lists D1 `DB` and KV `KV` ids matching the Pages dashboard; Worker foundation still does not read them.
+- **Secrets:** Missing `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` → Deploy job **skips** with `::notice::` (does not fail CI).
+
+**Token scope (minimal):** Account **Cloudflare Pages — Edit**; **D1 — Edit** only if migrations are added later.
+
+**Status:** Accepted (FAB-190 refs).
