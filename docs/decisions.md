@@ -39,4 +39,30 @@
 
 **Decision:** Add `.github/workflows/deploy.yml` (`workflow_dispatch` only). It builds the single artifact and documents the intended order (preview deploy → smoke → promote → prod smoke → rollback on failure). Real wrangler deploy steps stay gated on `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` (not set in foundation).
 
-**Status:** Skeleton merged with FAB-190; live deploy in a follow-up issue/PR.
+**Status:** Superseded by live deploy workflow below (FAB-190 follow-up).
+
+## 2026-11-16 — Live production deploy with smoke and auto-rollback
+
+**Context:** Cloudflare Pages project `vibueno` exists (direct upload, `vibueno.pages.dev`). Foundation shipped a secret-gated deploy skeleton; FAB-190 follow-up wires real deploy without splitting the Worker/templates artifact.
+
+**Decision:**
+
+- **Single artifact:** `npm run build` → `wrangler pages deploy hosted/public` with **wrangler 4.45.0** (pinned in workflow).
+- **Triggers:** `workflow_run` after **CI** succeeds on `push` to `main`, plus `workflow_dispatch`. No `pull_request_target`.
+- **Smoke:** `scripts/smoke-vibueno.mjs` with bounded backoff (`scripts/smoke-retry.mjs`, ~2 min); production URL defaults to `https://vibueno.pages.dev`.
+- **Rollback:** `scripts/pages-deploy-lib.mjs` records the rollback target from **live** `GET /api/version` on the production URL (not Cloudflare `canonical_deployment` or deployment history), maps that SHA to a Pages deployment via `deployment_trigger.metadata.commit_hash`, and rolls back on smoke failure. Post-rollback smoke must match that pre-deploy live SHA. Wrangler passes `--commit-hash` on every upload. First deploy requires `VIBUENO_ALLOW_FIRST_DEPLOY=true` when no live SHA is readable.
+
+## 2026-11-16 — Rollback target: live `/api/version`, not Pages metadata
+
+**Context:** After a smoke-failed deploy, Cloudflare Pages still marks the rejected upload as a successful production deployment and may set `canonical_deployment` to it, even when traffic was rolled back and `/api/version` still serves the prior SHA.
+
+**Decision:** Before deploy, **read production `/api/version`** (with backoff) as the source of truth for “what is live”. Resolve the rollback deployment id by matching that SHA against `commit_hash` metadata on production deployments (newest match). If the live SHA cannot be read or matched, **abort before deploy**. Do not infer live state from `canonical_deployment` or newest-first lists.
+
+**Status:** Accepted (FAB-190 follow-up / PR #2).
+- **Preflight:** `scripts/verify-deploy-preflight.mjs` — `workflow_dispatch` only on `refs/heads/main` with green CI; deploy SHA must equal `origin/main` HEAD (stale `workflow_run` skipped).
+- **Bindings:** `hosted/wrangler.toml` lists D1 `DB` and KV `KV` ids matching the Pages dashboard; Worker foundation still does not read them.
+- **Secrets:** Missing `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` → Deploy job **skips** with `::notice::` (does not fail CI).
+
+**Token scope (minimal):** Account **Cloudflare Pages — Edit**; **D1 — Edit** only if migrations are added later.
+
+**Status:** Accepted (FAB-190 refs).
